@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.nn.functional import softmax
 from gst_updated.src.gumbel_social_transformer.mha import VanillaMultiheadAttention
 from gst_updated.src.gumbel_social_transformer.utils import _get_activation_fn, gumbel_softmax
-
+from gst_updated.src.gumbel_social_transformer.group_generator import GroupGenerator
 
 class EdgeSelector(nn.Module):
     r"""No ghost version."""
@@ -21,6 +21,7 @@ class EdgeSelector(nn.Module):
         self.activation = _get_activation_fn(activation)
         self.d_model = d_model
         self.d_motion = d_motion
+        self.group_gen = GroupGenerator(d_type='learned_12norm')
 
     
     def forward(self, x, A, attn_mask, tau=1., hard=False, device='cuda:0'):
@@ -52,6 +53,7 @@ class EdgeSelector(nn.Module):
                 # (time_step, target_node, num_heads, neighbor_node)
                 # neighbor_node = nnode in no ghost mode
         """
+        A = self.group_gen(x, attn_mask, tau=tau, hard=hard)
         bsz, nnode, d_motion = x.shape
         assert d_motion == self.d_motion
         attn_mask = attn_mask.to("cpu")
