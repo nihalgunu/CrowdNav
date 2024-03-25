@@ -20,6 +20,8 @@ class GroupGenerator(nn.Module):
 
     def find_group_indices(self, v, dist_mat):
         n_ped = v.size(-1)
+        dynamic_th = torch.median(dist_mat[dist_mat > 0]) * 0.15 # 15% of the median distance as the new threshold
+        self.th = min(self.th, dynamic_th)  # Apply the stricter of the static threshold or dynamic threshold
         mask = torch.ones_like(dist_mat).mul(1e4).triu()
         top_row, top_column = torch.nonzero(dist_mat.tril(diagonal=-1).add(mask).le(self.th), as_tuple=True)
         indices_raw = torch.arange(n_ped, dtype=top_row.dtype, device=v.device)
