@@ -1,5 +1,6 @@
+import torch
 import torch.nn as nn
-from gst_updated.src.gumbel_social_transformer.utils import _get_clones, _get_activation_fn
+import torch.nn.functional as F
 
 class TemporalConvolutionNet(nn.Module):
     def __init__(
@@ -15,16 +16,18 @@ class TemporalConvolutionNet(nn.Module):
         dropout=0.1,
         activation="relu",
         ):
-        super(TemporalConvolutionNet,self).__init__()
+        super(TemporalConvolutionNet, self).__init__()
         assert kernel_size % 2 == 1
         assert nconv >= 2
         padding = ((kernel_size - 1) // 2, 0)
-        norm_layer = nn.LayerNorm(in_channels)
-        timeconv_layer = nn.Conv2d(in_channels, in_channels, (kernel_size, 1), (stride, 1), padding)
+        
+        self.norms = nn.ModuleList([nn.LayerNorm(in_channels) for _ in range(nconv)])
+        self.timeconvs = nn.ModuleList([
+            nn.Conv2d(in_channels, in_channels, (kernel_size, 1), (stride, 1), padding) for _ in range(nconv)
+        ])
 
-        self.nconv = nconv
-        self.norms = _get_clones(norm_layer, nconv)
-        self.timeconvs = _get_clones(timeconv_layer, nconv)
+        # Adding an additional convolutional layer for spatial feature enhancement
+        self.spatial_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)  # Enhances spatial features
 
         self.timelinear1 = nn.Linear(obs_seq_len, pred_seq_len)
         self.timelinear2 = nn.Linear(pred_seq_len, pred_seq_len)
@@ -35,21 +38,36 @@ class TemporalConvolutionNet(nn.Module):
         self.linear2 = nn.Linear(dim_hidden, out_channels)
         self.dropout = nn.Dropout(dropout)
 
-        self.activation = _get_activation_fn(activation)
+        self.activation = activation
+
+        # Adding a self-attention mechanism to better capture temporal dependencies
+        self.self_attention = nn.MultiheadAttention(embed_dim=in_channels, num_heads=4)  # Adds self-attention for temporal sequences
+
+        # Adding a layer normalization for stability before self-attention
+        self.layer_norm_before_attention = nn.LayerNorm(in_channels)  # Normalization before attention
 
     def forward(self, x):
-        # x # (batch, obs_seq_len, node, embedding_size) # in_channels = embedding_size
-        # out # (batch, pred_seq_len, node, output_size) # output_size = 5
-        for i in range(self.nconv):
+        for i in range(len(self.norms)):
             x_norm = self.norms[i](x)
-            x_perm = x_norm.permute(0, 3, 1, 2) # (batch, embedding_size, obs_seq_len, node)
-            x_perm = self.activation(self.timeconvs[i](x_perm)) # (N, C, H, W) # (N, channels, T_{in}, V)
-            x_perm = x_perm.permute(0, 2, 3, 1) # (batch, obs_seq_len, node, embedding_size)
+            x_perm = x_norm.permute(0, 3, 1, 2)
+            x_perm = _get_activation_fn(self.activation)(self.timeconvs[i](x_perm))
+            x_perm = x_perm.permute(0, 2, 3, 1)
             x = x + x_perm
-        x = x.permute(0, 2, 3, 1) # (batch, node, embedding_size, obs_seq_len)
-        x = self.timedropout1(self.activation(self.timelinear1(x)))
-        x = self.timedropout2(self.activation(self.timelinear2(x))) # (batch, node, embedding_size, pred_seq_len)
-        x = x.permute(0, 3, 1, 2) # (batch, pred_seq_len, node, embedding_size)
-        x = self.dropout(self.activation(self.linear1(x)))
-        out = self.linear2(x) # (batch, pred_seq_len, node, out_channels)
+        
+        # Apply spatial convolution for enhanced feature extraction
+        x = x.permute(0, 3, 1, 2)  # Adjust for spatial conv
+        x = self.spatial_conv(x)  # Apply spatial conv
+        x = x.permute(0, 2, 3, 1)  # Revert permutation
+
+        # Normalize and apply self-attention
+        x = x.permute(1, 0, 2, 3)  # Adjust for self-attention (seq_len, batch, channels, nodes)
+        x = self.layer_norm_before_attention(x)  # Apply layer normalization
+        x, _ = self.self_attention(x, x, x)  # Apply self-attention
+        x = x.permute(1, 0, 2, 3)  # Revert to original order (batch, seq_len, channels, nodes)
+        
+        x = self.timedropout1(_get_activation_fn(self.activation)(self.timelinear1(x)))
+        x = self.timedropout2(_get_activation_fn(self.activation)(self.timelinear2(x)))
+        x = x.permute(0, 3, 1, 2)
+        x = self.dropout(_get_activation_fn(self.activation)(self.linear1(x)))
+        out = self.linear2(x)
         return out
